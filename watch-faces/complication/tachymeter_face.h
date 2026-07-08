@@ -42,19 +42,6 @@
 
 #include "movement.h"
 
-typedef struct {
-    rtc_counter_t start_counter; // rtc counter when the stopwatch was started
-    rtc_counter_t lap_counter;   // rtc counter when the stopwatch was lapped
-    rtc_counter_t stop_counter;  // rtc counter when the stopwatch was stopped
-    uint8_t status;              // the status the stopwatch is in (idle, running, stopped)
-    bool slow_refresh;           // update the display slowly (same 128Hz timekeeping accuracy)
-    struct {
-        rtc_counter_t seconds;
-        rtc_counter_t minutes;
-        rtc_counter_t hours;
-    } old_display;               // the digits currently being displayed on screen
-} tachymeter_state_t;
-
 void tachymeter_face_setup(uint8_t watch_face_index, void ** context_ptr);
 void tachymeter_face_activate(void *context);
 bool tachymeter_face_loop(movement_event_t event, void *context);

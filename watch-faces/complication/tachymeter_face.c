@@ -34,24 +34,44 @@
 #include "watch_rtc.h"
 #include "slcd.h"
 
-/*
-    This watch face implements the original F-91W stopwatch functionality
-    including counting hundredths of seconds and lap timing. There are two
-    improvements compared to the functionality of the original: 
-    1. When reaching 59:59 the counter does not simply jump back to zero,
-       but keeps track of hours in the upper right hand corner. (Up to 24h)
-    2. Long pressing the light button toggles the led behaviour: it either
-       turns on on each button press or it doesn't.
-*/
-
 // Loosely implement the watch as a state machine
 typedef enum {
-    SW_STATUS_IDLE = 0,
-    SW_STATUS_RUNNING,
-    SW_STATUS_RUNNING_LAPPING,
-    SW_STATUS_STOPPED,
-    SW_STATUS_STOPPED_LAPPING
-} stopwatch_status_t;
+    TC_STATUS_IDLE = 0,
+    TC_STATUS_RUNNING,
+    TC_STATUS_RUNNING_LAPPING,
+    TC_STATUS_STOPPED,
+    TC_STATUS_STOPPED_LAPPING,
+
+    TC_STATUS_SETTING_UNITS,
+    TC_STATUS_SETTING_1,
+    TC_STATUS_SETTING_0,
+} tachymeter_status_t;
+
+typedef enum {
+    TC_UNITS_KM,
+    TC_UNITS_MILES,
+    TC_NUM_UNITS
+} TC_UNITS_T;
+
+typedef struct {
+    rtc_counter_t seconds;
+    rtc_counter_t minutes;
+    rtc_counter_t hours;
+} hms_t;
+
+typedef struct {
+    rtc_counter_t start_counter; // rtc counter when the tachymeter was started
+    rtc_counter_t lap_counter;   // rtc counter when the tachymeter was lapped
+    rtc_counter_t stop_counter;  // rtc counter when the tachymeter was stopped
+    uint8_t result_ticks;        // tick counter for alternating between time and speed display
+    uint32_t distance;           // distance in "units", either km or miles
+    uint32_t speed_100;          // speed in 1/100 "units" per hour, either km/h or mph
+    TC_UNITS_T units;            // units for the distance
+    tachymeter_status_t status;  // the status the tachymeter is in (idle, running, stopped)
+    bool slow_refresh;           // update the display slowly (same 128Hz timekeeping accuracy)
+    bool scrolling;              // whether the digit setting is scrolling or not
+    hms_t old_display;           // the digits currently being displayed on screen
+} tachymeter_state_t;
 
 static inline void _button_beep() {
     // play a beep as confirmation for a button press (if applicable)
@@ -63,13 +83,29 @@ static inline void _button_beep() {
 static const uint8_t DISPLAY_RUNNING_RATE = 32;
 static const uint8_t DISPLAY_RUNNING_RATE_SLOW = 2;
 
+static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
+    if (elapsed > 0 && state->distance > 0) {
+        uint32_t distance = state->distance;
+        uint32_t multiplier = 360000u * watch_rtc_get_frequency();
+        uint32_t distance_max = UINT32_MAX / multiplier + 1u;
+        while (distance > distance_max) {
+            distance >>= 1;
+            multiplier >>= 1;
+            elapsed >>= 1;
+        }
+        state->speed_100 = (state->distance * multiplier + (elapsed / 2)) / elapsed;
+    } else {
+        state->speed_100 = 0;
+    }
+}
+
 /// @brief Display minutes, seconds and fractions derived from 128 Hz tick counter
 ///        on the lcd.
 /// @param ticks
 static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
     char buf[3];
 
-    if (state->slow_refresh && (state->status == SW_STATUS_RUNNING || state->status == SW_STATUS_IDLE)) {
+    if (state->slow_refresh && (state->status == TC_STATUS_RUNNING || state->status == TC_STATUS_IDLE)) {
         watch_display_character_lp_seconds(' ', 8);
         watch_display_character_lp_seconds(' ', 9);
     } else {
@@ -117,12 +153,37 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
     }
 }
 
-static void _draw_indicators(tachymeter_state_t *state, movement_event_t event, uint32_t elapsed) {
+static void _display_speed(tachymeter_state_t *state) {
+    char buf[7];
+    uint32_t speed_100 = state->speed_100;
+    uint32_t speed_int = 0u;
+    uint32_t speed_frac = 0u;
+
+    if (state->distance == 0u || state->speed_100 > 999949u) {
+        strcpy(buf, "----  ");
+    } else if (state->speed_100 > 9994u) {
+        speed_100 += 50u;
+        speed_int = speed_100 / 100u;
+        sprintf(buf, "%4lu  ", speed_int);
+    } else if (state->speed_100 > 994u) {
+        speed_100 = (speed_100 + 5u) / 10u;
+        speed_int = speed_100 / 10u;
+        speed_frac = speed_100 % 10u;
+        sprintf(buf, "%2lu_%01lu  ", speed_int, speed_frac);
+    } else {
+        speed_int = speed_100 / 100u;
+        speed_frac = speed_100 % 100u;
+        sprintf(buf, "%01lu_%02lu  ", speed_int, speed_frac);
+    }
+    watch_display_text(WATCH_POSITION_BOTTOM, buf);
+}
+
+static void _draw_elapsed_indicators(tachymeter_state_t *state, movement_event_t event, uint32_t elapsed) {
     uint8_t subsecond;
     bool tock;
 
     switch (state->status) {
-        case SW_STATUS_RUNNING:
+        case TC_STATUS_RUNNING:
             subsecond = elapsed & 127;
             tock = subsecond >= 64;
 
@@ -135,7 +196,7 @@ static void _draw_indicators(tachymeter_state_t *state, movement_event_t event, 
 
             return;
 
-        case SW_STATUS_RUNNING_LAPPING:
+        case TC_STATUS_RUNNING_LAPPING:
             tock = event.subsecond > 0;
 
             if (tock) {
@@ -148,14 +209,14 @@ static void _draw_indicators(tachymeter_state_t *state, movement_event_t event, 
 
             return;
 
-        case SW_STATUS_STOPPED_LAPPING:
+        case TC_STATUS_STOPPED_LAPPING:
             watch_set_indicator(WATCH_INDICATOR_LAP);
             watch_set_colon();
 
             return;
 
-        case SW_STATUS_STOPPED:
-        case SW_STATUS_IDLE:
+        case TC_STATUS_STOPPED:
+        case TC_STATUS_IDLE:
         default:
             watch_clear_indicator(WATCH_INDICATOR_LAP);
             watch_set_colon();
@@ -163,69 +224,207 @@ static void _draw_indicators(tachymeter_state_t *state, movement_event_t event, 
     }
 }
 
+static void _draw_speed_indicators(tachymeter_state_t *state) {
+    watch_clear_colon();
+    if (state->status == TC_STATUS_STOPPED_LAPPING) {
+        watch_set_indicator(WATCH_INDICATOR_LAP);
+    } else {
+        watch_clear_indicator(WATCH_INDICATOR_LAP);
+    }
+}
+
+static void _draw_setting_indicators(void) {
+    watch_clear_indicator(WATCH_INDICATOR_LAP);
+    watch_clear_colon();
+}
+
+static void _display_setting(tachymeter_state_t *state, movement_event_t event) {
+    char buf[3];
+    bool tock = event.subsecond >= 2;
+
+    if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM) {
+        if (tock && state->status == TC_STATUS_SETTING_UNITS) {
+            watch_display_text(WATCH_POSITION_SECONDS, "  ");
+        } else {
+            watch_display_text(WATCH_POSITION_SECONDS, state->units == TC_UNITS_KM ? "KM" : "MI");
+        }
+    } else {
+        if (tock && state->status == TC_STATUS_SETTING_UNITS) {
+            watch_display_text(WATCH_POSITION_TOP_LEFT, "  ");
+        } else {
+            watch_display_text(WATCH_POSITION_TOP_LEFT, state->units == TC_UNITS_KM ? "KM" : "MI");
+        }
+    }
+    sprintf(buf, "%02lu", state->distance % 100u);
+    if (tock && state->status == TC_STATUS_SETTING_1) {
+        buf[0] = ' ';
+    }
+    else if (tock && state->status == TC_STATUS_SETTING_0) {
+        buf[1] = ' ';
+    }
+    watch_display_text(WATCH_POSITION_MINUTES, buf);
+    watch_display_text(WATCH_POSITION_HOURS, "  ");
+}
+
+static void _display_update(tachymeter_state_t *state, movement_event_t event, uint32_t elapsed) {
+    switch (state->status) {
+        case TC_STATUS_IDLE:
+        case TC_STATUS_RUNNING:
+        case TC_STATUS_RUNNING_LAPPING:
+            _draw_elapsed_indicators(state, event, elapsed);
+            _display_elapsed(state, elapsed);
+            return;
+        case TC_STATUS_STOPPED:
+        case TC_STATUS_STOPPED_LAPPING:
+            state->result_ticks++;
+            if (state->result_ticks & 0x02u) {
+                state->old_display = (hms_t) { -1, -1, -1 };
+                _draw_elapsed_indicators(state, event, elapsed);
+                _display_elapsed(state, elapsed);
+            } else {
+                _draw_speed_indicators(state);
+                _display_speed(state);
+            }
+            return;
+        case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_1:
+        case TC_STATUS_SETTING_0:
+            _draw_setting_indicators();
+            _display_setting(state, event);
+            return;
+        default:
+            return;
+    }
+}
+
 static uint8_t get_refresh_rate(tachymeter_state_t *state) {
     switch (state->status) {
-        case SW_STATUS_RUNNING:
+        case TC_STATUS_RUNNING:
             if (state->slow_refresh) {
                 return DISPLAY_RUNNING_RATE_SLOW;
             } else {
                 return DISPLAY_RUNNING_RATE;
             }
-        case SW_STATUS_RUNNING_LAPPING:
+        case TC_STATUS_RUNNING_LAPPING:
             return 2;
-        case SW_STATUS_STOPPED:
-        case SW_STATUS_IDLE:
+        case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_1:
+        case TC_STATUS_SETTING_0:
+            return 4;
+        case TC_STATUS_STOPPED:
+        case TC_STATUS_IDLE:
         default:
             return 1;
     }
 }
 
+static void setting_digit_inc(tachymeter_state_t *state) {
+    // Increment the digit being set, with wrap-around.
+    switch (state->status) {
+        case TC_STATUS_SETTING_UNITS:
+            state->units = (state->units + 1) % TC_NUM_UNITS;
+            break;
+        case TC_STATUS_SETTING_1:
+            state->distance = (state->distance + 10u) % 100u;
+            break;
+        case TC_STATUS_SETTING_0:
+            state->distance += ((state->distance + 1u) % 10u) ? 1 : -9;
+            break;
+        default:
+            break;
+    }
+}
+
+static void button_event_beep(tachymeter_state_t *state, movement_event_t event) {
+    switch (event.event_type) {
+        case EVENT_ALARM_BUTTON_DOWN:
+        case EVENT_LIGHT_BUTTON_DOWN:
+        case EVENT_LIGHT_LONG_PRESS:
+            switch (state->status) {
+                case TC_STATUS_SETTING_UNITS:
+                case TC_STATUS_SETTING_1:
+                case TC_STATUS_SETTING_0:
+                    // Don't beep when setting the digits, just flash the display.
+                    break;
+                default:
+                    _button_beep();
+                    break;
+            }
+            break;
+        case EVENT_ALARM_LONG_PRESS:
+            switch (state->status) {
+                case TC_STATUS_IDLE:
+                    // fall through
+                case TC_STATUS_RUNNING:
+                    _button_beep();
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case EVENT_LIGHT_BUTTON_UP:
+            if (state->status == TC_STATUS_SETTING_0) {
+                _button_beep();
+            }
+        default:
+            break;
+    }
+}
 static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, movement_event_type_t event_type) {
     switch (state->status) {
-        case SW_STATUS_IDLE:
+        case TC_STATUS_IDLE:
             switch (event_type) {
                 case EVENT_ALARM_BUTTON_DOWN:
-                    state->status = SW_STATUS_RUNNING;
+                    state->status = TC_STATUS_RUNNING;
                     state->start_counter = counter;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_LONG_PRESS:
                     state->slow_refresh = !state->slow_refresh;
                     return;
+                case EVENT_ALARM_LONG_PRESS:
+                    state->status = TC_STATUS_SETTING_UNITS;
+                    movement_request_tick_frequency(get_refresh_rate(state));
+                    return;
                 default:
                     return;
             }
 
-        case SW_STATUS_RUNNING:
+        case TC_STATUS_RUNNING:
             switch (event_type) {
                 case EVENT_ALARM_BUTTON_DOWN:
-                    state->status = SW_STATUS_STOPPED;
+                    state->status = TC_STATUS_STOPPED;
                     state->stop_counter = counter;
+                    calc_speed(state, counter - state->start_counter);
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_BUTTON_DOWN:
-                    state->status = SW_STATUS_RUNNING_LAPPING;
+                    state->status = TC_STATUS_RUNNING_LAPPING;
                     state->lap_counter = counter;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
+                case EVENT_ALARM_LONG_PRESS:
+                    state->status = TC_STATUS_SETTING_UNITS;
+                    movement_request_tick_frequency(get_refresh_rate(state));
                 default:
                     return;
             }
 
-        case SW_STATUS_RUNNING_LAPPING:
+        case TC_STATUS_RUNNING_LAPPING:
             switch (event_type) {
                 case EVENT_ALARM_BUTTON_DOWN:
-                    state->status = SW_STATUS_STOPPED_LAPPING;
+                    state->status = TC_STATUS_STOPPED_LAPPING;
                     state->stop_counter = counter;
+                    calc_speed(state, counter - state->start_counter);
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_BUTTON_DOWN:
-                    state->status = SW_STATUS_RUNNING;
+                    state->status = TC_STATUS_RUNNING;
                     state->lap_counter = counter;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_LONG_PRESS:
-                    state->status = SW_STATUS_RUNNING;
+                    state->status = TC_STATUS_RUNNING;
                     state->slow_refresh = !state->slow_refresh;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
@@ -233,35 +432,64 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
                     return;
             }
 
-        case SW_STATUS_STOPPED_LAPPING:
+        case TC_STATUS_STOPPED_LAPPING:
             switch (event_type) {
                 case EVENT_ALARM_BUTTON_DOWN:
-                    state->status = SW_STATUS_RUNNING_LAPPING;
+                    state->status = TC_STATUS_RUNNING_LAPPING;
                     state->start_counter = counter - state->stop_counter + state->start_counter;
                     state->lap_counter = counter - state->stop_counter + state->lap_counter;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_BUTTON_DOWN:
-                    state->status = SW_STATUS_STOPPED;
+                    calc_speed(state, state->stop_counter - state->start_counter);
+                    state->old_display = (hms_t) { -1, -1, -1 };
+                    state->status = TC_STATUS_STOPPED;
                     return;
                 default:
                     return;
             }
 
-        case SW_STATUS_STOPPED:
+        case TC_STATUS_STOPPED:
             switch (event_type) {
                 case EVENT_ALARM_BUTTON_DOWN:
-                    state->status = SW_STATUS_RUNNING;
+                    state->status = TC_STATUS_RUNNING;
                     state->start_counter = counter - state->stop_counter + state->start_counter;
                     movement_request_tick_frequency(get_refresh_rate(state));
                     return;
                 case EVENT_LIGHT_BUTTON_DOWN:
-                    state->status = SW_STATUS_IDLE;
+                    state->old_display = (hms_t) { -1, -1, -1 };
+                    state->status = TC_STATUS_IDLE;
                     return;
                 default:
                     return;
             }
 
+        case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_1:
+        case TC_STATUS_SETTING_0:
+            switch (event_type) {
+                case EVENT_ALARM_BUTTON_UP:
+                    setting_digit_inc(state);
+                    return;
+                case EVENT_LIGHT_BUTTON_UP:
+                    if (state->status == TC_STATUS_SETTING_0) {
+                        state->status = TC_STATUS_IDLE;
+                        state->scrolling = false;
+                        state->old_display = (hms_t) { -1, -1, -1 };
+                    } else {
+                        state->status++;
+                    }
+                    return;
+                case EVENT_LIGHT_LONG_PRESS:
+                    state->status = TC_STATUS_SETTING_UNITS;
+                    state->distance = 0;
+                    return;
+                case EVENT_ALARM_LONG_PRESS:
+                    state->scrolling = true;
+                    return;
+                default:
+                    return;
+            }
         default:
             return;
     }
@@ -269,17 +497,17 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
 
 static uint32_t elapsed_time(tachymeter_state_t *state, rtc_counter_t counter) {
     switch (state->status) {
-        case SW_STATUS_IDLE:
+        case TC_STATUS_IDLE:
             return 0;
 
-        case SW_STATUS_RUNNING:
+        case TC_STATUS_RUNNING:
             return counter - state->start_counter;
 
-        case SW_STATUS_RUNNING_LAPPING:
-        case SW_STATUS_STOPPED_LAPPING:
+        case TC_STATUS_RUNNING_LAPPING:
+        case TC_STATUS_STOPPED_LAPPING:
             return state->lap_counter - state->start_counter;
 
-        case SW_STATUS_STOPPED:
+        case TC_STATUS_STOPPED:
             return state->stop_counter - state->start_counter;
 
         default:
@@ -296,16 +524,17 @@ void tachymeter_face_setup(uint8_t watch_face_index, void ** context_ptr) {
         state->start_counter = 0;
         state->stop_counter = 0;
         state->lap_counter = 0;
-        state->status = SW_STATUS_IDLE;
+        state->status = TC_STATUS_IDLE;
     }
 }
 
 void tachymeter_face_activate(void *context) {
     tachymeter_state_t *state = (tachymeter_state_t *) context;
+    if (state->status >= TC_STATUS_SETTING_UNITS && state->status <= TC_STATUS_SETTING_0) {
+        state->status = TC_STATUS_IDLE;
+    }
     // force full re-draw
-    state->old_display.seconds = UINT_MAX;
-    state->old_display.minutes = UINT_MAX;
-    state->old_display.hours = UINT_MAX;
+    state->old_display = (hms_t) { -1, -1, -1 };
     movement_request_tick_frequency(get_refresh_rate(state));
 }
 
@@ -314,23 +543,20 @@ bool tachymeter_face_loop(movement_event_t event, void *context) {
 
     rtc_counter_t counter = watch_rtc_get_counter();
 
+    button_event_beep(state, event);
     state_transition(state, counter, event.event_type);
     rtc_counter_t elapsed = elapsed_time(state, counter);
 
     switch (event.event_type) {
         case EVENT_ACTIVATE:
             watch_display_text_with_fallback(WATCH_POSITION_TOP_LEFT, "TCY", "TC");
-            _draw_indicators(state, event, elapsed);
-            _display_elapsed(state, elapsed);
+            _display_update(state, event, elapsed);
             break;
-        case EVENT_ALARM_BUTTON_DOWN:
         case EVENT_LIGHT_BUTTON_DOWN:
-        case EVENT_LIGHT_LONG_PRESS:
-            _button_beep();
-            // fall through
+            // Inhibit the LED
+            break;
         case EVENT_TICK:
-            _draw_indicators(state, event, elapsed);
-            _display_elapsed(state, elapsed);
+            _display_update(state, event, elapsed);
             break;
         default:
             movement_default_loop_handler(event);
