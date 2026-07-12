@@ -25,6 +25,7 @@
  */
 
 #include <stdlib.h>
+#include <inttypes.h>
 #include <string.h>
 #include <limits.h>
 #include "tachymeter_face.h"
@@ -179,7 +180,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             return;
         }
         state->old_display.seconds = seconds;
-        sprintf(buf, "%02lu", seconds % 60);
+        sprintf(buf, "%02" PRIu32, seconds % 60);
         watch_display_text(WATCH_POSITION_SECONDS, buf);
 
         // Minutes
@@ -188,7 +189,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             return;
         }
         state->old_display.minutes = minutes;
-        sprintf(buf, "%02lu", minutes % 60);
+        sprintf(buf, "%02" PRIu32, minutes % 60);
         watch_display_text(WATCH_POSITION_MINUTES, buf);
 
         // Hours
@@ -197,7 +198,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             return;
         }
         state->old_display.hours = hours;
-        sprintf(buf, "%02lu", hours);
+        sprintf(buf, "%02" PRIu32, hours);
         watch_display_text(WATCH_POSITION_HOURS, buf);
     } else {
         // Display MM:SS.ss (or MM:SS if slow refresh is enabled)
@@ -216,7 +217,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             return;
         }
         state->old_display.seconds = seconds;
-        sprintf(buf, "%02lu", seconds % 60);
+        sprintf(buf, "%02" PRIu32, seconds % 60);
         watch_display_text(WATCH_POSITION_MINUTES, buf);
 
         // Minutes
@@ -225,7 +226,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             return;
         }
         state->old_display.minutes = minutes;
-        sprintf(buf, "%02lu", minutes % 60);
+        sprintf(buf, "%02" PRIu32, minutes % 60);
         watch_display_text(WATCH_POSITION_HOURS, buf);
     }
 }
@@ -234,7 +235,7 @@ static void _display_small_distance(tachymeter_state_t *state) {
     char buf[3];
 
     if (state->distance > 0u && state->distance <= 39u) {
-        sprintf(buf, "%2lu", state->distance);
+        sprintf(buf, "%2" PRIu32, state->distance);
     } else {
         strcpy(buf, "  ");
     }
@@ -259,16 +260,16 @@ static void _display_speed(tachymeter_state_t *state) {
     } else if (speed_100 > 9994u) {
         speed_100 += 50u;
         speed_int = speed_100 / 100u;
-        sprintf(buf, "%4lu%s", speed_int, result_units);
+        sprintf(buf, "%4" PRIu32 "%s", speed_int, result_units);
     } else if (speed_100 > 999u) {
         speed_100 = (speed_100 + 5u) / 10u;
         speed_int = speed_100 / 10u;
         speed_frac = speed_100 % 10u;
-        sprintf(buf, "%2lu-%01lu%s", speed_int, speed_frac, result_units);
+        sprintf(buf, "%2" PRIu32 "-%01" PRIu32 "%s", speed_int, speed_frac, result_units);
     } else {
         speed_int = speed_100 / 100u;
         speed_frac = speed_100 % 100u;
-        sprintf(buf, "%01lu-%02lu%s", speed_int, speed_frac, result_units);
+        sprintf(buf, "%1" PRIu32 "-%02" PRIu32 "%s", speed_int, speed_frac, result_units);
     }
     watch_display_text(WATCH_POSITION_BOTTOM, buf);
 }
@@ -351,7 +352,7 @@ static void _display_setting(tachymeter_state_t *state, movement_event_t event) 
             watch_display_text(WATCH_POSITION_TOP_LEFT, units_str(state->units));
         }
     }
-    sprintf(buf, "%04lu", state->distance);
+    sprintf(buf, "%04" PRIu32, state->distance);
     if (tock) {
         switch (state->status) {
             case TC_STATUS_SETTING_3:
