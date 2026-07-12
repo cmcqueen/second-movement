@@ -34,6 +34,8 @@
 #include "watch_rtc.h"
 #include "slcd.h"
 
+#define TICK_FREQ_HZ 128u   // Should be the same as watch_rtc_get_frequency()
+
 // Loosely implement the watch as a state machine
 typedef enum {
     TC_STATUS_IDLE = 0,
@@ -43,13 +45,18 @@ typedef enum {
     TC_STATUS_STOPPED_LAPPING,
 
     TC_STATUS_SETTING_UNITS,
+    TC_STATUS_SETTING_3,
+    TC_STATUS_SETTING_2,
     TC_STATUS_SETTING_1,
     TC_STATUS_SETTING_0,
 } tachymeter_status_t;
 
 typedef enum {
     TC_UNITS_KM,
+    TC_UNITS_M,
     TC_UNITS_MILES,
+    TC_UNITS_YD,
+    TC_UNITS_FT,
     TC_NUM_UNITS
 } TC_UNITS_T;
 
@@ -86,7 +93,23 @@ static const uint8_t DISPLAY_RUNNING_RATE_SLOW = 2;
 static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
     if (elapsed > 0 && state->distance > 0) {
         uint32_t distance = state->distance;
-        uint32_t multiplier = 360000u * watch_rtc_get_frequency();
+        uint32_t multiplier;
+        switch (state->units) {
+            case TC_UNITS_KM:
+            case TC_UNITS_MILES:
+            default:
+                multiplier = 100u * 3600u * TICK_FREQ_HZ;
+                break;
+            case TC_UNITS_M:
+                multiplier = (100u * 3600u * TICK_FREQ_HZ + (1000u / 2u)) / 1000u;
+                break;
+            case TC_UNITS_YD:
+                multiplier = (100u * 3600u * TICK_FREQ_HZ + (1760u / 2u)) / 1760u;
+                break;
+            case TC_UNITS_FT:
+                multiplier = (100u * 3600u * TICK_FREQ_HZ + (5280u / 2u)) / 5280u;
+                break;
+        }
         uint32_t distance_max = UINT32_MAX / multiplier + 1u;
         while (distance > distance_max) {
             distance >>= 1;
@@ -105,7 +128,7 @@ static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
 static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
     char buf[3];
 
-    uint32_t one_hour_ticks = 3600u * watch_rtc_get_frequency();
+    uint32_t one_hour_ticks = 3600u * TICK_FREQ_HZ;
     uint32_t seconds = ticks >> 7;
 
     if (ticks >= one_hour_ticks) {
@@ -262,32 +285,60 @@ static void _draw_setting_indicators(void) {
     watch_clear_colon();
 }
 
+static const char * units_str(TC_UNITS_T units) {
+    switch (units) {
+        case TC_UNITS_KM:
+            return "KM";
+        case TC_UNITS_M:
+            return "M ";
+        case TC_UNITS_MILES:
+            return "MI";
+        case TC_UNITS_YD:
+            return "YD";
+        case TC_UNITS_FT:
+            return "FT";
+        default:
+            return "--";
+    }
+}
+
 static void _display_setting(tachymeter_state_t *state, movement_event_t event) {
-    char buf[3];
+    char buf[5];
     bool tock = event.subsecond >= 2;
 
     if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM) {
         if (tock && state->status == TC_STATUS_SETTING_UNITS) {
             watch_display_text(WATCH_POSITION_SECONDS, "  ");
         } else {
-            watch_display_text(WATCH_POSITION_SECONDS, state->units == TC_UNITS_KM ? "KM" : "MI");
+            watch_display_text(WATCH_POSITION_SECONDS, units_str(state->units));
         }
     } else {
         if (tock && state->status == TC_STATUS_SETTING_UNITS) {
             watch_display_text(WATCH_POSITION_TOP_LEFT, "  ");
         } else {
-            watch_display_text(WATCH_POSITION_TOP_LEFT, state->units == TC_UNITS_KM ? "KM" : "MI");
+            watch_display_text(WATCH_POSITION_TOP_LEFT, units_str(state->units));
         }
     }
-    sprintf(buf, "%02lu", state->distance % 100u);
-    if (tock && state->status == TC_STATUS_SETTING_1) {
-        buf[0] = ' ';
+    sprintf(buf, "%04lu", state->distance);
+    if (tock) {
+        switch (state->status) {
+            case TC_STATUS_SETTING_3:
+                buf[0] = ' ';
+                break;
+            case TC_STATUS_SETTING_2:
+                buf[1] = ' ';
+                break;
+            case TC_STATUS_SETTING_1:
+                buf[2] = ' ';
+                break;
+            case TC_STATUS_SETTING_0:
+                buf[3] = ' ';
+                break;
+            default:
+                break;
+        }
     }
-    else if (tock && state->status == TC_STATUS_SETTING_0) {
-        buf[1] = ' ';
-    }
-    watch_display_text(WATCH_POSITION_MINUTES, buf);
-    watch_display_text(WATCH_POSITION_HOURS, "  ");
+    watch_display_text(WATCH_POSITION_BOTTOM, buf);
 }
 
 static void _display_update(tachymeter_state_t *state, movement_event_t event, uint32_t elapsed) {
@@ -314,6 +365,8 @@ static void _display_update(tachymeter_state_t *state, movement_event_t event, u
             }
             return;
         case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_3:
+        case TC_STATUS_SETTING_2:
         case TC_STATUS_SETTING_1:
         case TC_STATUS_SETTING_0:
             _draw_setting_indicators();
@@ -335,6 +388,8 @@ static uint8_t get_refresh_rate(tachymeter_state_t *state) {
         case TC_STATUS_RUNNING_LAPPING:
             return 2;
         case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_3:
+        case TC_STATUS_SETTING_2:
         case TC_STATUS_SETTING_1:
         case TC_STATUS_SETTING_0:
             return 4;
@@ -351,8 +406,14 @@ static void setting_digit_inc(tachymeter_state_t *state) {
         case TC_STATUS_SETTING_UNITS:
             state->units = (state->units + 1) % TC_NUM_UNITS;
             break;
+        case TC_STATUS_SETTING_3:
+            state->distance = (state->distance + 1000u) % 10000u;
+            break;
+        case TC_STATUS_SETTING_2:
+            state->distance += (((state->distance / 100u) + 1u) % 10u) ? 100 : -900;
+            break;
         case TC_STATUS_SETTING_1:
-            state->distance = (state->distance + 10u) % 100u;
+            state->distance += (((state->distance / 10u) + 1u) % 10u) ? 10 : -90;
             break;
         case TC_STATUS_SETTING_0:
             state->distance += ((state->distance + 1u) % 10u) ? 1 : -9;
@@ -369,6 +430,8 @@ static void button_event_beep(tachymeter_state_t *state, movement_event_t event)
         case EVENT_LIGHT_LONG_PRESS:
             switch (state->status) {
                 case TC_STATUS_SETTING_UNITS:
+                case TC_STATUS_SETTING_3:
+                case TC_STATUS_SETTING_2:
                 case TC_STATUS_SETTING_1:
                 case TC_STATUS_SETTING_0:
                     // Don't beep when setting the digits, just flash the display.
@@ -496,6 +559,8 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
             }
 
         case TC_STATUS_SETTING_UNITS:
+        case TC_STATUS_SETTING_3:
+        case TC_STATUS_SETTING_2:
         case TC_STATUS_SETTING_1:
         case TC_STATUS_SETTING_0:
             switch (event_type) {
