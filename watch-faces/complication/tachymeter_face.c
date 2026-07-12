@@ -151,7 +151,6 @@ static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
         uint32_t distance_max = UINT32_MAX / multiplier + 1u;
         while (distance > distance_max) {
             distance >>= 1;
-            multiplier >>= 1;
             elapsed >>= 1;
         }
         state->speed_100 = (distance * multiplier + (elapsed / 2u)) / elapsed;
