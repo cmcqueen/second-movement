@@ -93,7 +93,7 @@ static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
             multiplier >>= 1;
             elapsed >>= 1;
         }
-        state->speed_100 = (state->distance * multiplier + (elapsed / 2)) / elapsed;
+        state->speed_100 = (distance * multiplier + (elapsed / 2u)) / elapsed;
     } else {
         state->speed_100 = 0;
     }
@@ -110,6 +110,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
 
     if (ticks >= one_hour_ticks) {
         // Display HH:MM:SS
+        // Seconds
         if (seconds == state->old_display.seconds) {
             return;
         }
@@ -117,6 +118,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
         sprintf(buf, "%02lu", seconds % 60);
         watch_display_text(WATCH_POSITION_SECONDS, buf);
 
+        // Minutes
         uint32_t minutes = seconds / 60;
         if (minutes == state->old_display.minutes) {
             return;
@@ -125,6 +127,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
         sprintf(buf, "%02lu", minutes % 60);
         watch_display_text(WATCH_POSITION_MINUTES, buf);
 
+        // Hours
         uint32_t hours = (minutes / 60) % 24;
         if (hours == state->old_display.hours) {
             return;
@@ -144,6 +147,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
             watch_display_character_lp_seconds('0' + sec_100 % 10, 9);
         }
 
+        // Seconds
         if (seconds == state->old_display.seconds) {
             return;
         }
@@ -151,6 +155,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
         sprintf(buf, "%02lu", seconds % 60);
         watch_display_text(WATCH_POSITION_MINUTES, buf);
 
+        // Minutes
         uint32_t minutes = seconds / 60;
         if (minutes == state->old_display.minutes) {
             return;
@@ -178,13 +183,13 @@ static void _display_speed(tachymeter_state_t *state) {
     uint32_t speed_int = 0u;
     uint32_t speed_frac = 0u;
 
-    if (state->distance == 0u || state->speed_100 > 999949u) {
+    if (state->distance == 0u || speed_100 > 999949u) {
         strcpy(buf, "----  ");
-    } else if (state->speed_100 > 9994u) {
+    } else if (speed_100 > 9994u) {
         speed_100 += 50u;
         speed_int = speed_100 / 100u;
         sprintf(buf, "%4lu  ", speed_int);
-    } else if (state->speed_100 > 994u) {
+    } else if (speed_100 > 999u) {
         speed_100 = (speed_100 + 5u) / 10u;
         speed_int = speed_100 / 10u;
         speed_frac = speed_100 % 10u;
@@ -299,7 +304,7 @@ static void _display_update(tachymeter_state_t *state, movement_event_t event, u
                 state->result_ticks++;
             }
             // Alternate between displaying the elapsed time and the calculated speed
-            if (state->result_ticks & 0x02u) {
+            if ((state->result_ticks & 0x02u) && state->distance) {
                 state->old_display = (hms_t) { -1, -1, -1 };
                 _draw_speed_indicators(state);
                 _display_speed(state);
