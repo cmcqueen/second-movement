@@ -33,11 +33,17 @@
  * It incorporates stopwatch functionality, but adds the ability to calculate
  * average speed based on a known distance.
  *
- * Use the ALARM button to start and stop the stopwatch.
+ * Hold the ALARM button to enter the distance setting mode. Use the LIGHT button to
+ * cycle through the digits, and the ALARM button to increment the selected digit.
+ *
+ * Press the ALARM button briefly to start and stop the stopwatch.
+ * When the stopwatch is stopped, the average speed is calculated and displayed based
+ * on the elapsed time and the set distance.
+ * Press the LIGHT button when the stopwatch is not running to reset the stopwatch.
+ *
  * Press the LIGHT button while the stopwatch is running to view the lap time.
- *  (The stopwatch continues running in the background, indicated by a blinking colon.)
+ * (The stopwatch continues running in the background, indicated by a blinking colon.)
  * Press the LIGHT button again to switch back to the running stopwatch.
- * Press the LIGHT button when the timekeeping is stopped to reset the stopwatch.
  */
 
 #include "movement.h"

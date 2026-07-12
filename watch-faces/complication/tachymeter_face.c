@@ -35,7 +35,8 @@
 #include "watch_rtc.h"
 #include "slcd.h"
 
-#define TICK_FREQ_HZ 128u   // Should be the same as watch_rtc_get_frequency()
+#define TICK_FREQ_HZ   128u                   // Should be the same as watch_rtc_get_frequency()
+#define ONE_HOUR_TICKS (3600u * TICK_FREQ_HZ)
 
 // Loosely implement the watch as a state machine
 typedef enum {
@@ -45,19 +46,19 @@ typedef enum {
     TC_STATUS_STOPPED,
     TC_STATUS_STOPPED_LAPPING,
 
-    TC_STATUS_SETTING_UNITS,
-    TC_STATUS_SETTING_3,
-    TC_STATUS_SETTING_2,
-    TC_STATUS_SETTING_1,
-    TC_STATUS_SETTING_0,
+    TC_STATUS_SETTING_UNITS, // set the units for the distance (km, miles, etc.)
+    TC_STATUS_SETTING_3,     // set thousands digit of distance
+    TC_STATUS_SETTING_2,     // set hundreds digit of distance
+    TC_STATUS_SETTING_1,     // set tens digit of distance
+    TC_STATUS_SETTING_0,     // set ones digit of distance
 } tachymeter_status_t;
 
 typedef enum {
     TC_UNITS_KM,
-    TC_UNITS_M,
+    TC_UNITS_METERS,
     TC_UNITS_MILES,
-    TC_UNITS_YD,
-    TC_UNITS_FT,
+    TC_UNITS_YARDS,
+    TC_UNITS_FEET,
     TC_NUM_UNITS
 } TC_UNITS_T;
 
@@ -98,13 +99,13 @@ static const char * units_str(TC_UNITS_T units) {
                 return "KM";
             else
                 return "K ";
-        case TC_UNITS_M:
+        case TC_UNITS_METERS:
             return "M ";
         case TC_UNITS_MILES:
             return "MI";
-        case TC_UNITS_YD:
+        case TC_UNITS_YARDS:
             return "YD";
-        case TC_UNITS_FT:
+        case TC_UNITS_FEET:
             return "FT";
         default:
             return "--";
@@ -114,14 +115,14 @@ static const char * units_str(TC_UNITS_T units) {
 static const char * units_result_str(TC_UNITS_T units) {
     switch (units) {
         case TC_UNITS_KM:
-        case TC_UNITS_M:
+        case TC_UNITS_METERS:
             if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM)
                 return "KM";
             else
                 return "K ";
         case TC_UNITS_MILES:
-        case TC_UNITS_YD:
-        case TC_UNITS_FT:
+        case TC_UNITS_YARDS:
+        case TC_UNITS_FEET:
             return "MI";
         default:
             return "--";
@@ -136,23 +137,34 @@ static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
             case TC_UNITS_KM:
             case TC_UNITS_MILES:
             default:
+                // Speed result is in km/h or mph, corresponding to the distance units.
+                // Calculation is the same in both cases.
                 multiplier = 100u * 3600u * TICK_FREQ_HZ;
                 break;
-            case TC_UNITS_M:
+            case TC_UNITS_METERS:
+                // Speed calculation result is in km/h, so we need to divide by 1000.
+                // + (1000u / 2u) is to round the multiplier to the nearest integer instead of truncating.
                 multiplier = (100u * 3600u * TICK_FREQ_HZ + (1000u / 2u)) / 1000u;
                 break;
-            case TC_UNITS_YD:
+            case TC_UNITS_YARDS:
+                // Speed calculation result is in mph, so we need to divide by 1760 (yards per mile).
+                // + (1760u / 2u) is to round the multiplier to the nearest integer instead of truncating.
                 multiplier = (100u * 3600u * TICK_FREQ_HZ + (1760u / 2u)) / 1760u;
                 break;
-            case TC_UNITS_FT:
+            case TC_UNITS_FEET:
+                // Speed calculation result is in mph, so we need to divide by 5280 (feet per mile).
+                // + (5280u / 2u) is to round the multiplier to the nearest integer instead of truncating.
                 multiplier = (100u * 3600u * TICK_FREQ_HZ + (5280u / 2u)) / 5280u;
                 break;
         }
+        // If necessary, scale the distance and elapsed time down to avoid overflow in the calculation.
         uint32_t distance_max = UINT32_MAX / multiplier + 1u;
         while (distance > distance_max) {
             distance >>= 1;
             elapsed >>= 1;
         }
+        // Calculate speed in 1/100 units per hour, rounded to the nearest integer.
+        // + (elapsed / 2u) is to round the division to the nearest integer instead of truncating.
         state->speed_100 = (distance * multiplier + (elapsed / 2u)) / elapsed;
     } else {
         state->speed_100 = 0;
@@ -169,10 +181,9 @@ static void _display_title(void) {
 static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
     char buf[3];
 
-    uint32_t one_hour_ticks = 3600u * TICK_FREQ_HZ;
     uint32_t seconds = ticks >> 7;
 
-    if (ticks >= one_hour_ticks) {
+    if (ticks >= ONE_HOUR_TICKS) {
         // Display HH:MM:SS
         // Seconds
         if (seconds == state->old_display.seconds) {
@@ -230,6 +241,7 @@ static void _display_elapsed(tachymeter_state_t *state, uint32_t ticks) {
     }
 }
 
+/// @brief Display the distance in the top right corner of the lcd, if it is between 1 and 39.
 static void _display_small_distance(tachymeter_state_t *state) {
     char buf[3];
 
@@ -241,6 +253,9 @@ static void _display_small_distance(tachymeter_state_t *state) {
     watch_display_text(WATCH_POSITION_TOP_RIGHT, buf);
 }
 
+/// @brief Display the calculated speed in the bottom of the lcd.
+/// Display as many significant digits as possible, with a maximum of 4 digits,
+/// and any decimal point represented as a dash in one digit position of the LCD.
 static void _display_speed(tachymeter_state_t *state) {
     char buf[7];
     const char *result_units;
