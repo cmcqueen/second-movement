@@ -90,6 +90,43 @@ static inline void _button_beep() {
 static const uint8_t DISPLAY_RUNNING_RATE = 32;
 static const uint8_t DISPLAY_RUNNING_RATE_SLOW = 2;
 
+static const char * units_str(TC_UNITS_T units) {
+    switch (units) {
+        case TC_UNITS_KM:
+            if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM)
+                return "KM";
+            else
+                return "K ";
+        case TC_UNITS_M:
+            return "M ";
+        case TC_UNITS_MILES:
+            return "MI";
+        case TC_UNITS_YD:
+            return "YD";
+        case TC_UNITS_FT:
+            return "FT";
+        default:
+            return "--";
+    }
+}
+
+static const char * units_result_str(TC_UNITS_T units) {
+    switch (units) {
+        case TC_UNITS_KM:
+        case TC_UNITS_M:
+            if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM)
+                return "KM";
+            else
+                return "K ";
+        case TC_UNITS_MILES:
+        case TC_UNITS_YD:
+        case TC_UNITS_FT:
+            return "MI";
+        default:
+            return "--";
+    }
+}
+
 static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
     if (elapsed > 0 && state->distance > 0) {
         uint32_t distance = state->distance;
@@ -120,6 +157,10 @@ static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
     } else {
         state->speed_100 = 0;
     }
+}
+
+static void _display_title(void) {
+    watch_display_text_with_fallback(WATCH_POSITION_TOP_LEFT, "TCY", "TC");
 }
 
 /// @brief Display minutes, seconds and fractions derived from 128 Hz tick counter
@@ -202,25 +243,32 @@ static void _display_small_distance(tachymeter_state_t *state) {
 
 static void _display_speed(tachymeter_state_t *state) {
     char buf[7];
+    const char *result_units;
     uint32_t speed_100 = state->speed_100;
     uint32_t speed_int = 0u;
     uint32_t speed_frac = 0u;
 
+    if (watch_get_lcd_type() == WATCH_LCD_TYPE_CUSTOM) {
+        result_units = units_result_str(state->units);
+    } else {
+        result_units = "  ";
+    }
+
     if (state->distance == 0u || speed_100 > 999949u) {
-        strcpy(buf, "----  ");
+        sprintf(buf, "----%s", result_units);
     } else if (speed_100 > 9994u) {
         speed_100 += 50u;
         speed_int = speed_100 / 100u;
-        sprintf(buf, "%4lu  ", speed_int);
+        sprintf(buf, "%4lu%s", speed_int, result_units);
     } else if (speed_100 > 999u) {
         speed_100 = (speed_100 + 5u) / 10u;
         speed_int = speed_100 / 10u;
         speed_frac = speed_100 % 10u;
-        sprintf(buf, "%2lu_%01lu  ", speed_int, speed_frac);
+        sprintf(buf, "%2lu-%01lu%s", speed_int, speed_frac, result_units);
     } else {
         speed_int = speed_100 / 100u;
         speed_frac = speed_100 % 100u;
-        sprintf(buf, "%01lu_%02lu  ", speed_int, speed_frac);
+        sprintf(buf, "%01lu-%02lu%s", speed_int, speed_frac, result_units);
     }
     watch_display_text(WATCH_POSITION_BOTTOM, buf);
 }
@@ -285,23 +333,6 @@ static void _draw_setting_indicators(void) {
     watch_clear_colon();
 }
 
-static const char * units_str(TC_UNITS_T units) {
-    switch (units) {
-        case TC_UNITS_KM:
-            return "KM";
-        case TC_UNITS_M:
-            return "M ";
-        case TC_UNITS_MILES:
-            return "MI";
-        case TC_UNITS_YD:
-            return "YD";
-        case TC_UNITS_FT:
-            return "FT";
-        default:
-            return "--";
-    }
-}
-
 static void _display_setting(tachymeter_state_t *state, movement_event_t event) {
     char buf[5];
     bool tock = event.subsecond >= 2;
@@ -313,6 +344,7 @@ static void _display_setting(tachymeter_state_t *state, movement_event_t event) 
             watch_display_text(WATCH_POSITION_SECONDS, units_str(state->units));
         }
     } else {
+        watch_display_text(WATCH_POSITION_SECONDS, "  ");
         if (tock && state->status == TC_STATUS_SETTING_UNITS) {
             watch_display_text(WATCH_POSITION_TOP_LEFT, "  ");
         } else {
@@ -572,6 +604,7 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
                         state->status = TC_STATUS_IDLE;
                         state->scrolling = false;
                         state->old_display = (hms_t) { -1, -1, -1 };
+                        _display_title();
                         _display_small_distance(state);
                     } else {
                         state->status++;
@@ -646,7 +679,7 @@ bool tachymeter_face_loop(movement_event_t event, void *context) {
 
     switch (event.event_type) {
         case EVENT_ACTIVATE:
-            watch_display_text_with_fallback(WATCH_POSITION_TOP_LEFT, "TCY", "TC");
+            _display_title();
             _display_update(state, event, elapsed);
             _display_small_distance(state);
             break;
