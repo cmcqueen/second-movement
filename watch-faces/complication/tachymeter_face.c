@@ -129,6 +129,29 @@ static const char * units_result_str(TC_UNITS_T units) {
     }
 }
 
+static void setting_digit_inc(tachymeter_state_t *state) {
+    // Increment the digit being set, with wrap-around.
+    switch (state->status) {
+        case TC_STATUS_SETTING_UNITS:
+            state->units = (state->units + 1) % TC_NUM_UNITS;
+            break;
+        case TC_STATUS_SETTING_3:
+            state->distance = (state->distance + 1000u) % 10000u;
+            break;
+        case TC_STATUS_SETTING_2:
+            state->distance += (((state->distance / 100u) + 1u) % 10u) ? 100 : -900;
+            break;
+        case TC_STATUS_SETTING_1:
+            state->distance += (((state->distance / 10u) + 1u) % 10u) ? 10 : -90;
+            break;
+        case TC_STATUS_SETTING_0:
+            state->distance += ((state->distance + 1u) % 10u) ? 1 : -9;
+            break;
+        default:
+            break;
+    }
+}
+
 static void calc_speed(tachymeter_state_t *state, uint32_t elapsed) {
     if (elapsed > 0 && state->distance > 0) {
         uint32_t distance = state->distance;
@@ -367,7 +390,7 @@ static void _display_setting(tachymeter_state_t *state, movement_event_t event) 
         }
     }
     sprintf(buf, "%04" PRIu32, state->distance);
-    if (tock) {
+    if (tock && !state->scrolling) {
         switch (state->status) {
             case TC_STATUS_SETTING_3:
                 buf[0] = ' ';
@@ -416,6 +439,9 @@ static void _display_update(tachymeter_state_t *state, movement_event_t event, u
         case TC_STATUS_SETTING_2:
         case TC_STATUS_SETTING_1:
         case TC_STATUS_SETTING_0:
+            if (state->scrolling) {
+                setting_digit_inc(state);
+            }
             _draw_setting_indicators();
             _display_setting(state, event);
             return;
@@ -444,29 +470,6 @@ static uint8_t get_refresh_rate(tachymeter_state_t *state) {
         case TC_STATUS_IDLE:
         default:
             return 1;
-    }
-}
-
-static void setting_digit_inc(tachymeter_state_t *state) {
-    // Increment the digit being set, with wrap-around.
-    switch (state->status) {
-        case TC_STATUS_SETTING_UNITS:
-            state->units = (state->units + 1) % TC_NUM_UNITS;
-            break;
-        case TC_STATUS_SETTING_3:
-            state->distance = (state->distance + 1000u) % 10000u;
-            break;
-        case TC_STATUS_SETTING_2:
-            state->distance += (((state->distance / 100u) + 1u) % 10u) ? 100 : -900;
-            break;
-        case TC_STATUS_SETTING_1:
-            state->distance += (((state->distance / 10u) + 1u) % 10u) ? 10 : -90;
-            break;
-        case TC_STATUS_SETTING_0:
-            state->distance += ((state->distance + 1u) % 10u) ? 1 : -9;
-            break;
-        default:
-            break;
     }
 }
 
@@ -614,6 +617,12 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
                 case EVENT_ALARM_BUTTON_UP:
                     setting_digit_inc(state);
                     return;
+                case EVENT_ALARM_LONG_PRESS:
+                    state->scrolling = true;
+                    return;
+                case EVENT_ALARM_LONG_UP:
+                    state->scrolling = false;
+                    return;
                 case EVENT_LIGHT_BUTTON_UP:
                     if (state->status == TC_STATUS_SETTING_0) {
                         state->status = TC_STATUS_IDLE;
@@ -628,9 +637,6 @@ static void state_transition(tachymeter_state_t *state, rtc_counter_t counter, m
                 case EVENT_LIGHT_LONG_PRESS:
                     state->status = TC_STATUS_SETTING_UNITS;
                     state->distance = 0;
-                    return;
-                case EVENT_ALARM_LONG_PRESS:
-                    state->scrolling = true;
                     return;
                 default:
                     return;
