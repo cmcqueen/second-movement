@@ -41,9 +41,14 @@
  * on the elapsed time and the set distance.
  * Press the LIGHT button when the stopwatch is not running to reset the stopwatch.
  *
- * Press the LIGHT button while the stopwatch is running to view the lap time.
- * (The stopwatch continues running in the background, indicated by a blinking colon.)
- * Press the LIGHT button again to switch back to the running stopwatch.
+ * Press the LIGHT button while the stopwatch is running to view the lap time. The
+ * lap's time and calculated speed are shown. Press LIGHT button again to show elapsed
+ * time of the next lap (this is different than the normal stopwatch operation).
+ *
+ * Press the ALARM button to end the final lap and stop the stopwatch. That final lap's
+ * time and calculated speed are shown. Press the LIGHT button to show the total time
+ * of all laps, and calculated average speed of all laps. Press the LIGHT button a
+ * second time to reset.
  */
 
 #include "movement.h"
